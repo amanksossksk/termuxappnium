@@ -1,0 +1,185 @@
+# android_controller
+
+A small, dependency-free Python library that gives you an Appium-style
+device API on top of either:
+
+- **`adb`** — running from a host machine that has `adb` installed, or
+- **`su` (Termux root)** — running directly on a rooted Android device.
+
+You pick the mode by editing `config.json`. The rest of your code stays
+the same.
+
+```python
+from android_controller import Device
+
+d = Device.from_config("config.json")
+
+d.tap(500, 1000)
+d.swipe(500, 1500, 500, 500, duration_ms=300)
+d.type_text("hello world")
+d.press_key("BACK")
+d.screenshot("out.png")
+
+el = d.wait_for_element(text="Login", timeout=10)
+el.tap()
+```
+
+## Install
+
+No external Python dependencies. Just drop the folder somewhere on your
+PYTHONPATH (or `pip install -e .` if you add a `pyproject.toml`).
+
+Requirements per mode:
+
+| Mode | Where you run the script | Needs |
+|------|--------------------------|-------|
+| `adb`  | Host machine (Linux / macOS / Windows) | `adb` in `PATH`, USB debugging enabled on the phone |
+| `root` | On the phone (Termux) | A rooted device + `su` available to Termux |
+
+For Termux root mode, install Termux and grant it root via your root
+manager (e.g. Magisk → Superuser → allow Termux):
+
+```bash
+pkg install python
+pip install --upgrade pip
+# drop this project into your $HOME/android_controller
+cd ~/android_controller
+python examples/basic_usage.py
+```
+
+## Config
+
+`config.json`:
+
+```json
+{
+  "mode": "adb",
+  "adb": {
+    "binary": "adb",
+    "serial": null,
+    "host": null,
+    "port": null,
+    "default_timeout": 30
+  },
+  "root": {
+    "su_binary": "su",
+    "shell_prefix": ["su", "-c"],
+    "default_timeout": 30
+  },
+  "device": {
+    "tmp_dir": "/data/local/tmp",
+    "ui_dump_path": "/data/local/tmp/window_dump.xml",
+    "screenshot_path": "/data/local/tmp/screen.png"
+  }
+}
+```
+
+- `mode`: `"adb"` or `"root"`.
+- `adb.serial`: pass `null` for the default device, otherwise the
+  `adb devices` serial.
+- `adb.host` / `adb.port`: only set these if you talk to a remote
+  `adb` server (`-H`/`-P`).
+- `root.shell_prefix`: leave as `["su", "-c"]` for Termux. Some custom
+  root setups want `["su", "0", "-c"]` or `["sudo"]` — change here.
+- `device.tmp_dir`: world-readable on-device staging directory. Used for
+  things like installing APKs over `su` (see below).
+
+## Feature matrix
+
+All of the below work in either mode, transparently.
+
+| Category | Methods |
+|----------|---------|
+| Raw shell | `shell(cmd)`, `run(cmd)` |
+| Files | `push(local, remote)`, `pull(remote, local)` |
+| Touch | `tap`, `double_tap`, `long_press`, `swipe`, `drag` |
+| Scroll | `scroll_up`, `scroll_down`, `scroll_left`, `scroll_right` |
+| Keyboard | `press_key`, `long_press_key`, `type_text`, `clear_text` |
+| Screen | `screen_size`, `screen_density`, `orientation`, `set_orientation`, `wake`, `sleep_screen`, `is_screen_on`, `unlock`, `swipe_unlock` |
+| Screenshot | `screenshot(path)`, `screenshot_bytes()` |
+| UI tree | `dump_ui()` (alias `source()`), `find_element`, `find_elements`, `find_element_or_raise`, `wait_for_element`, `wait_until_gone`, `exists` |
+| Tap helpers | `tap_text`, `tap_id`, `tap_desc` |
+| Apps | `list_packages`, `is_installed`, `install_apk`, `uninstall`, `start_app`, `stop_app`, `clear_app_data`, `current_app`, `open_url` |
+| Device info | `device_info`, `get_prop`, `set_prop`, `battery`, `ip_addresses`, `get_setting`, `put_setting` |
+| Network | `wifi(on)`, `data(on)`, `airplane_mode(on)` |
+| Logging | `logcat(lines, filter_tag=)`, `clear_logcat()` |
+
+### Finding UI elements
+
+`find_element(**filters)` parses the output of `uiautomator dump`.
+Filter keys are translated to uiautomator XML attributes:
+
+| Python kwarg | Matches XML attribute |
+|--------------|----------------------|
+| `text` | `text` (exact) |
+| `text_contains` | `text` (substring) |
+| `text_matches` | `text` (regex) |
+| `content_desc` / `desc` | `content-desc` |
+| `desc_contains` | `content-desc` (substring) |
+| `resource_id` / `id` | `resource-id` |
+| `resource_id_contains` | `resource-id` (substring) |
+| `class_name` / `cls` | `class` |
+| `package` | `package` |
+| `clickable`, `enabled`, `checked`, `focused`, `scrollable`, `selected` | the matching boolean attribute |
+
+Anything else is matched as an exact attribute equality, so you can
+pass raw uiautomator attribute names too.
+
+```python
+btn = d.find_element(resource_id="com.example:id/login", clickable=True)
+btn.tap()
+
+# Substring + regex filters
+d.find_elements(text_contains="Settings")
+d.find_elements(content_desc_matches=r"^Notif.*")
+```
+
+### Typing text
+
+`type_text` uses `input text` under the hood. Spaces and shell
+metacharacters are escaped. For full Unicode support you'll want to
+install an IME (e.g. Appium UnicodeIME) like Appium does — that's out
+of scope here but easy to add.
+
+### Installing APKs from Termux
+
+When `mode = "root"`, `install_apk(path)` stages the APK to
+`device.tmp_dir` (default `/data/local/tmp`) before calling
+`pm install`, because `pm` runs as `system` and cannot read files under
+`/data/data/com.termux/...`. You don't need to do anything special — it
+just works:
+
+```python
+d.install_apk("/sdcard/Download/my-app.apk")
+```
+
+## Mapping from your original snippet
+
+Both of your `run()` helpers map directly:
+
+```python
+# Your "adb" version:
+def run(cmd):
+    result = subprocess.run(f"adb shell {cmd}", shell=True, ...)
+    return result.stdout.strip()
+
+# Your "root" version:
+def run(cmd):
+    if cmd.startswith("adb shell"):
+        cmd = cmd.replace("adb shell ", "")
+    result = subprocess.run(['su', '-c', cmd], ...)
+    return result.stdout.strip()
+```
+
+Equivalent here:
+
+```python
+d = Device.from_config("config.json")   # mode in config.json picks one
+print(d.run("input tap 500 500"))       # same return value (stdout)
+```
+
+Both also tolerate the `adb shell` prefix being present or absent.
+
+## License
+
+MIT (or whatever you prefer — drop a LICENSE file in).

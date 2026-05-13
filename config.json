@@ -1,0 +1,20 @@
+{
+  "mode": "adb",
+  "adb": {
+    "binary": "adb",
+    "serial": null,
+    "host": null,
+    "port": null,
+    "default_timeout": 30
+  },
+  "root": {
+    "su_binary": "su",
+    "shell_prefix": ["su", "-c"],
+    "default_timeout": 30
+  },
+  "device": {
+    "tmp_dir": "/data/local/tmp",
+    "ui_dump_path": "/data/local/tmp/window_dump.xml",
+    "screenshot_path": "/data/local/tmp/screen.png"
+  }
+}
