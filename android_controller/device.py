@@ -149,6 +149,146 @@ class Device:
         x2 = int(w * (0.8 - distance_ratio))
         self.swipe(x1, cy, max(0, x2), cy, duration_ms=duration_ms)
 
+    def swipe_in(
+        self,
+        element_or_bounds,
+        direction: str = "down",
+        *,
+        ratio: float = 0.6,
+        duration_ms: int = 350,
+        margin_ratio: float = 0.15,
+    ) -> None:
+        """Swipe within a specific element / region instead of the full screen.
+
+        `element_or_bounds` can be a `UIElement` or a tuple `(l, t, r, b)`.
+
+        `direction` is the direction the *content* should scroll:
+
+          - "down"  -> reveals items above (finger swipes top -> bottom)
+          - "up"    -> reveals items below (finger swipes bottom -> top)
+          - "right" -> reveals items to the left
+          - "left"  -> reveals items to the right
+
+        `ratio` is the fraction of the available axis the finger travels.
+        `margin_ratio` keeps the swipe away from the edges where Android often
+        eats gestures (back-gesture, status bar, navigation handle).
+        """
+        from .elements import UIElement
+
+        if isinstance(element_or_bounds, UIElement):
+            bounds = element_or_bounds.bounds
+            if bounds is None:
+                raise ValueError("Element has no bounds, cannot swipe inside it")
+        else:
+            bounds = tuple(element_or_bounds)
+
+        l, t, r, b = bounds
+        w, h = r - l, b - t
+        cx, cy = (l + r) // 2, (t + b) // 2
+        mx = int(w * margin_ratio)
+        my = int(h * margin_ratio)
+        dx = int(w * ratio / 2)
+        dy = int(h * ratio / 2)
+
+        direction = direction.lower()
+        if direction == "down":
+            self.swipe(cx, t + my, cx, t + my + dy * 2, duration_ms=duration_ms)
+        elif direction == "up":
+            self.swipe(cx, b - my, cx, b - my - dy * 2, duration_ms=duration_ms)
+        elif direction == "right":
+            self.swipe(l + mx, cy, l + mx + dx * 2, cy, duration_ms=duration_ms)
+        elif direction == "left":
+            self.swipe(r - mx, cy, r - mx - dx * 2, cy, duration_ms=duration_ms)
+        else:
+            raise ValueError(f"Unknown direction: {direction!r}")
+
+    def scroll_to(
+        self,
+        *,
+        max_swipes: int = 25,
+        direction: str = "down",
+        container=None,
+        poll: float = 0.2,
+        duration_ms: int = 350,
+        ratio: float = 0.6,
+        **filters,
+    ):
+        """Swipe inside a scrollable container until an element matching `filters` is visible.
+
+        Returns the matching `UIElement` on success, or None after `max_swipes`.
+
+        - If `container` is None, autodetects the largest visible scrollable
+          view (`class` containing "ScrollView" or "ListView" or
+          "RecyclerView", or `scrollable=true`).
+        - `direction` is the direction *content* should scroll. "auto" tries
+          both: it scrolls down a few times, then up if not found.
+
+        Example:
+            d.scroll_to(text="2004", direction="down")     # year picker
+            d.scroll_to(resource_id="...:id/foo", direction="up", max_swipes=10)
+        """
+        import time
+
+        if "filter" in filters and isinstance(filters["filter"], dict):
+            filters = filters["filter"]
+
+        existing = self.find_element(**filters)
+        if existing is not None:
+            return existing
+
+        # Resolve container
+        if container is None:
+            container = self._auto_scrollable_container()
+        if container is None:
+            # Fall back to a full-screen swipe ratio
+            w, h = self.screen_size()
+            bounds = (0, int(h * 0.15), w, int(h * 0.85))
+        else:
+            bounds = container.bounds
+            if bounds is None:
+                w, h = self.screen_size()
+                bounds = (0, int(h * 0.15), w, int(h * 0.85))
+
+        directions = (
+            [direction] if direction != "auto" else ["down", "up"]
+        )
+
+        for dir_ in directions:
+            for _ in range(max_swipes):
+                self.swipe_in(
+                    bounds, direction=dir_, ratio=ratio, duration_ms=duration_ms
+                )
+                time.sleep(poll)
+                el = self.find_element(**filters)
+                if el is not None:
+                    return el
+
+        return None
+
+    def _auto_scrollable_container(self):
+        """Pick the largest visible scrollable view on screen."""
+        candidates = self.find_elements(scrollable=True)
+        if not candidates:
+            # Heuristic: look for common scrollable widget classes
+            for cls in (
+                "androidx.recyclerview.widget.RecyclerView",
+                "android.widget.ListView",
+                "android.widget.ScrollView",
+                "androidx.viewpager.widget.ViewPager",
+            ):
+                candidates.extend(self.find_elements(class_name=cls))
+        best = None
+        best_area = -1
+        for el in candidates:
+            b = el.bounds
+            if not b:
+                continue
+            area = (b[2] - b[0]) * (b[3] - b[1])
+            if area > best_area:
+                best_area = area
+                best = el
+        return best
+
     # ------------------------------------------------------------------
     # Keyboard / text
     # ------------------------------------------------------------------

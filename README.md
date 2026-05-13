@@ -228,6 +228,44 @@ Recorder(d, target_package="mark.via.gp", output="via.jsonl").run()
 CLI options: `--no-launch`, `--no-filter`, `--poll-text-ms`, `--one-to-one`,
 `--config`.
 
+## Scrolling inside a specific view
+
+Full-screen `scroll_down()` / `scroll_up()` swipes from screen-wide
+coordinates, which can miss scrollable regions inside dialogs (e.g. the
+date-picker year list). Use these instead when the target lives inside a
+container:
+
+```python
+# Swipe inside a specific element/region.
+# `direction` is the direction *content* should scroll:
+#   "down"  -> reveals items above (finger swipes top->bottom)
+#   "up"    -> reveals items below (finger swipes bottom->top)
+d.swipe_in(year_list, direction="down")           # year_list is a UIElement
+d.swipe_in((100, 500, 1000, 1500), direction="up")  # raw (l,t,r,b)
+year_list.swipe(direction="down")                  # convenience on UIElement
+```
+
+`d.scroll_to(...)` ties it all together: it autodetects the scrollable
+container on screen (the largest `scrollable=true` / `ScrollView` /
+`ListView` / `RecyclerView`) and keeps swiping until your target element
+appears:
+
+```python
+# Open the year list, scroll to 2004, tap it.
+d.tap_id("android:id/date_picker_header_year")
+d.scroll_to(text="2004", direction="down").tap()
+
+# direction="auto" tries down first, then up.
+d.scroll_to(resource_id="...:id/foo", direction="auto", max_swipes=15)
+
+# Or scroll inside a specific container:
+list_view = d.find_element(class_name="android.widget.ListView")
+list_view.scroll_to(text="2004", direction="down").tap()
+```
+
+`scroll_to` returns the matching `UIElement` on success, or `None` after
+`max_swipes` (default 25).
+
 ## Inspecting the current UI
 
 Quick way to dump every `resource-id` / `text` / `class` for the app

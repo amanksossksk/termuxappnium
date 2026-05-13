@@ -142,6 +142,16 @@ class UIElement:
         self.tap()
         self._device.type_text(value)
 
+    def swipe(self, direction: str = "down", **kwargs) -> None:
+        """Swipe within this element's bounds. See `Device.swipe_in` for args."""
+        self._device.swipe_in(self, direction=direction, **kwargs)
+
+    def scroll_to(self, direction: str = "down", max_swipes: int = 25, **filters):
+        """Scroll inside this element until a child matching `filters` is visible."""
+        return self._device.scroll_to(
+            container=self, direction=direction, max_swipes=max_swipes, **filters
+        )
+
     def __repr__(self) -> str:
         return (
             f"UIElement(text={self.text!r}, "
