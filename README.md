@@ -228,6 +228,33 @@ Recorder(d, target_package="mark.via.gp", output="via.jsonl").run()
 CLI options: `--no-launch`, `--no-filter`, `--poll-text-ms`, `--one-to-one`,
 `--config`.
 
+## Inspecting the current UI
+
+Quick way to dump every `resource-id` / `text` / `class` for the app
+currently on screen — useful when writing automation against an unfamiliar
+app:
+
+```
+python -m android_controller.ids mark.via.gp
+python -m android_controller.ids mark.via.gp --clickable-only
+python -m android_controller.ids mark.via.gp --text
+python -m android_controller.ids mark.via.gp --ids-only        # one id per line
+python -m android_controller.ids mark.via.gp --json            # one JSON obj per element
+python -m android_controller.ids mark.via.gp --watch 0.5       # live-refresh
+python -m android_controller.ids --all                         # ignore package filter
+```
+
+Sample:
+
+```
+RESOURCE_ID                          TEXT          DESC          CLASS                       CLICKABLE  BOUNDS
+--------------------------------------------------------------------------------------------------------------
+mark.via.gp:id/url_bar                                          android.widget.EditText     YES        (24, 144, 1056, 240)
+mark.via.gp:id/btn_back               Back          Go back     android.widget.ImageButton  YES        (0, 144, 144, 240)
+mark.via.gp:id/tab_list               Tabs                      android.widget.ImageButton  YES        (936, 144, 1056, 240)
+...
+```
+
 ## License
 
 MIT (or whatever you prefer — drop a LICENSE file in).
