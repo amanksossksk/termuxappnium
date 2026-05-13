@@ -180,6 +180,54 @@ print(d.run("input tap 500 500"))       # same return value (stdout)
 
 Both also tolerate the `adb shell` prefix being present or absent.
 
+## Recording user interactions
+
+Open a target app and stream every tap, swipe, hardware key, and typed-text
+change to stdout (and optionally a `.jsonl` file):
+
+```
+python -m android_controller.record mark.via.gp
+python -m android_controller.record mark.via.gp -o via.jsonl
+```
+
+Sample output:
+
+```
+# Launching mark.via.gp ...
+# Screen: 1080x2400
+# Touch calibration: {'/dev/input/event2': (1080, 2400)}
+# Recording... (Ctrl+C to stop)
+[19:12:03.412] TAP   [540, 1820]  id=mark.via.gp:id/url_bar  text=''
+[19:12:05.103] TEXT  text='example.com'  id=mark.via.gp:id/url_bar
+[19:12:06.812] KEY   ENTER
+[19:12:09.991] SWIPE [540, 2100] -> [540, 600] (310ms)
+```
+
+How it works:
+
+* `getevent -lt` is streamed over your shell (ADB or root) and parsed in real
+  time → produces `TAP` / `SWIPE` / hardware-`KEY` events.
+* After every tap we run `uiautomator dump` and look up the deepest element
+  whose bounds contain the tap point → fills in `resource_id` / `text` /
+  `content-desc`.
+* For typed text we poll the UI hierarchy and diff `EditText.text` values
+  per `resource-id`, so the *resulting* text is logged regardless of which
+  IME or autocomplete the user used.
+* Everything is filtered by the foreground package, so unrelated taps in the
+  status bar / launcher / keyboard are ignored.
+
+Programmatic API:
+
+```python
+from android_controller import Device, Recorder
+
+d = Device.from_config("config.json")
+Recorder(d, target_package="mark.via.gp", output="via.jsonl").run()
+```
+
+CLI options: `--no-launch`, `--no-filter`, `--poll-text-ms`, `--one-to-one`,
+`--config`.
+
 ## License
 
 MIT (or whatever you prefer — drop a LICENSE file in).

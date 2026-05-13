@@ -26,11 +26,14 @@ from .exceptions import (
     ElementNotFoundError,
     ConfigError,
 )
+from .recorder import Recorder, RecordedEvent
 
 __all__ = [
     "Config",
     "Device",
     "UIElement",
+    "Recorder",
+    "RecordedEvent",
     "AndroidControllerError",
     "CommandError",
     "ElementNotFoundError",

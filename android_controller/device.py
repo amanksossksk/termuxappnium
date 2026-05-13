@@ -411,16 +411,65 @@ class Device:
         return self.runner.uninstall(package, keep_data=keep_data)
 
     def start_app(self, package: str, *, activity: str | None = None) -> None:
-        """Launch an app by package (optionally specifying activity)."""
+        """Launch an app by package (optionally specifying activity).
+
+        Prefers `cmd package resolve-activity` + `am start -n PKG/ACT`, which
+        is the modern, reliable way. Falls back to `monkey` if the launcher
+        activity can't be resolved.
+        """
+        if not activity:
+            activity = self.resolve_launcher_activity(package)
         if activity:
+            component = activity if "/" in activity else f"{package}/{activity}"
             self.shell(
-                f"am start -n {shlex.quote(package + '/' + activity)}", check=True
-            )
-        else:
-            self.shell(
-                "monkey -p " + shlex.quote(package) + " -c android.intent.category.LAUNCHER 1",
+                "am start -W "
+                "-a android.intent.action.MAIN "
+                "-c android.intent.category.LAUNCHER "
+                f"-n {shlex.quote(component)}",
                 check=True,
             )
+            return
+        # Fallback: monkey. We don't check= here because monkey often returns
+        # weird exit codes even on success.
+        self.shell(
+            "monkey -p " + shlex.quote(package) + " -c android.intent.category.LAUNCHER 1",
+            timeout=30,
+        )
+
+    def resolve_launcher_activity(self, package: str) -> str | None:
+        """Return 'package/Activity' for the LAUNCHER activity, or None.
+
+        Works on Android 7+ via `cmd package`. Falls back to parsing
+        `dumpsys package` for older devices.
+        """
+        # Modern path
+        out = self.shell(
+            "cmd package resolve-activity --brief "
+            "-c android.intent.category.LAUNCHER " + shlex.quote(package)
+        ).stdout
+        for line in out.splitlines():
+            line = line.strip()
+            if "/" in line and " " not in line:
+                return line
+        # Older fallback: dumpsys package
+        out = self.shell(
+            "dumpsys package " + shlex.quote(package)
+        ).stdout
+        match = re.search(
+            r"([A-Za-z][\w.]*\." + re.escape(package.split(".")[-1])
+            + r"|" + re.escape(package) + r")/([A-Za-z0-9_.$]+)",
+            out,
+        )
+        if match:
+            # Try a more specific search first
+            pass
+        match = re.search(
+            re.escape(package) + r"/([A-Za-z0-9_.$]+)",
+            out,
+        )
+        if match:
+            return f"{package}/{match.group(1)}"
+        return None
 
     def stop_app(self, package: str) -> None:
         self.shell(f"am force-stop {shlex.quote(package)}", check=True)
