@@ -27,6 +27,7 @@ from .exceptions import (
     ConfigError,
 )
 from .recorder import Recorder, RecordedEvent
+from .router import ScreenRouter, ScreenRule
 
 __all__ = [
     "Config",
@@ -34,6 +35,8 @@ __all__ = [
     "UIElement",
     "Recorder",
     "RecordedEvent",
+    "ScreenRouter",
+    "ScreenRule",
     "AndroidControllerError",
     "CommandError",
     "ElementNotFoundError",

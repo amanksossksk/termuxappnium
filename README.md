@@ -266,6 +266,48 @@ list_view.scroll_to(text="2004", direction="down").tap()
 `scroll_to` returns the matching `UIElement` on success, or `None` after
 `max_swipes` (default 25).
 
+## Handling random pop-up screens (ScreenRouter)
+
+App onboarding throws notifications/location/cookies/welcome dialogs at you
+in unpredictable order. `ScreenRouter` lets you declare each case once and
+run a loop that dispatches whichever screen shows up:
+
+```python
+from android_controller import Device, ScreenRouter
+
+d = Device.from_config("config.json")
+d.start_app("mark.via.gp")
+
+router = ScreenRouter(d)
+router.when(text_contains="notifications").tap_label("Skip", "Not now")
+router.when(text_contains="location").tap_label("Don't allow", "Deny")
+router.when(text_contains="cookies").tap_label("Accept all", "Agree")
+router.when(text="Welcome").tap_label("Get started", "Continue")
+router.when(text_contains="update").tap_label("Later", "Not now")
+router.when(text="I agree", clickable=True).tap_match()
+
+# Run until the main screen shows up (or 120s timeout).
+router.run(
+    stop_when={"resource_id": "mark.via.gp:id/url_bar"},
+    timeout=120,
+)
+```
+
+Available rule actions: `.tap_label(*labels)` (taps the first clickable
+text label), `.tap_match()` (taps the matched element itself),
+`.tap_id(resource_id)`, `.tap_desc(*descs)`, `.press_key(key)`, and
+`.do(callable)` for arbitrary logic — the callable receives
+`(device, matched_element)`.
+
+Tips:
+
+- Rules fire in registration order — register the most specific first.
+- Always add `clickable=True` when filtering by button text (Android often
+  duplicates the label in surrounding paragraph TextViews).
+- `stop_when` can be a filter dict (as above) or a callable
+  `(device) -> bool`.
+- `verbose=True` (default) prints which rule matched each iteration.
+
 ## Inspecting the current UI
 
 Quick way to dump every `resource-id` / `text` / `class` for the app
