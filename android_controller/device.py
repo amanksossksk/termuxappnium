@@ -90,6 +90,146 @@ class Device:
             check=True,
         )
 
+    # ------------------------------------------------------------------
+    # Low-level touch injection via sendevent (real driver-level touches).
+    #
+    # `input tap` injects MotionEvents through InputManager, which some
+    # views (notably DocumentsUI's SelectionTracker on Android 11+) ignore
+    # because they're missing multi-touch metadata.  `real_tap` writes
+    # ABS_MT_* + BTN_TOUCH events directly to the touchscreen evdev node,
+    # producing events indistinguishable from a real finger touch.
+    # ------------------------------------------------------------------
+
+    # populated lazily on first real_tap/real_swipe call
+    _touchscreen_cache = None
+
+    def _touchscreen_device(self) -> dict:
+        """Return cached dict {'dev': '/dev/input/eventN', 'max_x': N, 'max_y': N}."""
+        if self._touchscreen_cache is not None:
+            return self._touchscreen_cache
+        from .recorder import _parse_touch_calibration
+
+        out = self.shell("getevent -lp", timeout=10).stdout
+        calib = _parse_touch_calibration(out)
+        if not calib:
+            raise CommandError(
+                "getevent -lp",
+                -1,
+                out,
+                "No touchscreen device with BTN_TOUCH + ABS_MT_POSITION_X/Y found. "
+                "real_tap() needs evdev access; on plain ADB this requires "
+                "USB-debugging permissions to /dev/input/*, on Termux it requires root.",
+            )
+        dev, (max_x, max_y) = next(iter(calib.items()))
+        self._touchscreen_cache = {"dev": dev, "max_x": max_x, "max_y": max_y}
+        return self._touchscreen_cache
+
+    def real_tap(self, x: int, y: int, *, duration_ms: int = 80) -> None:
+        """Inject a real driver-level tap via `sendevent` on the touchscreen evdev.
+
+        Use this for views that ignore `input tap` (e.g. RecyclerView
+        SelectionTracker on Android 11 DocumentsUI). Requires evdev access
+        — root if you're in Termux/`su` mode; on ADB it works if the
+        device's input nodes are readable by `shell` (most are).
+        """
+        ts = self._touchscreen_device()
+        dev = ts["dev"]
+        max_x, max_y = ts["max_x"], ts["max_y"]
+        w, h = self.screen_size()
+
+        # Rescale screen coords -> input device coords (often identical, but
+        # older devices use distinct ranges).
+        ix = int(round(x * max_x / w)) if max_x else int(x)
+        iy = int(round(y * max_y / h)) if max_y else int(y)
+
+        # evdev codes (Linux input.h):
+        # EV_SYN=0, SYN_REPORT=0
+        # EV_KEY=1, BTN_TOUCH=330 (0x14A)
+        # EV_ABS=3, ABS_MT_TRACKING_ID=57, ABS_MT_POSITION_X=53,
+        #          ABS_MT_POSITION_Y=54, ABS_MT_TOUCH_MAJOR=48,
+        #          ABS_MT_PRESSURE=58
+        # Use Protocol B (in-kernel multi-touch slot tracking).
+        sleep_s = max(0.0, duration_ms / 1000.0)
+        seq = [
+            # Begin a new touch contact
+            f"sendevent {dev} 3 57 100",          # ABS_MT_TRACKING_ID = 100
+            f"sendevent {dev} 3 53 {ix}",         # ABS_MT_POSITION_X
+            f"sendevent {dev} 3 54 {iy}",         # ABS_MT_POSITION_Y
+            f"sendevent {dev} 3 48 5",            # ABS_MT_TOUCH_MAJOR
+            f"sendevent {dev} 3 58 50",           # ABS_MT_PRESSURE
+            f"sendevent {dev} 1 330 1",           # BTN_TOUCH down
+            f"sendevent {dev} 0 0 0",             # SYN_REPORT
+            f"sleep {sleep_s:.3f}" if sleep_s else "true",
+            # Release the contact (Protocol B)
+            f"sendevent {dev} 3 57 -1",           # ABS_MT_TRACKING_ID = -1
+            f"sendevent {dev} 1 330 0",           # BTN_TOUCH up
+            f"sendevent {dev} 0 0 0",             # SYN_REPORT
+        ]
+        # Run as a single shell so all events are buffered together (atomic
+        # from the framework's perspective and much faster than 10 round trips).
+        self.shell(" && ".join(seq), check=True)
+
+    def real_swipe(
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        *,
+        duration_ms: int = 250,
+        steps: int = 16,
+    ) -> None:
+        """Real driver-level swipe via sendevent (interpolated MOVE events).
+
+        Use when `input swipe` is ignored by a custom touch listener.
+        """
+        ts = self._touchscreen_device()
+        dev = ts["dev"]
+        max_x, max_y = ts["max_x"], ts["max_y"]
+        w, h = self.screen_size()
+
+        def rescale(x: int, y: int) -> tuple[int, int]:
+            ix = int(round(x * max_x / w)) if max_x else int(x)
+            iy = int(round(y * max_y / h)) if max_y else int(y)
+            return ix, iy
+
+        ix1, iy1 = rescale(x1, y1)
+        ix2, iy2 = rescale(x2, y2)
+        per_step_s = (duration_ms / 1000.0) / max(1, steps)
+
+        cmds: list[str] = [
+            # Touch down at start
+            f"sendevent {dev} 3 57 100",
+            f"sendevent {dev} 3 53 {ix1}",
+            f"sendevent {dev} 3 54 {iy1}",
+            f"sendevent {dev} 3 48 5",
+            f"sendevent {dev} 3 58 50",
+            f"sendevent {dev} 1 330 1",
+            f"sendevent {dev} 0 0 0",
+        ]
+        # Interpolated MOVEs
+        for i in range(1, steps + 1):
+            t = i / steps
+            mx = int(round(ix1 + (ix2 - ix1) * t))
+            my = int(round(iy1 + (iy2 - iy1) * t))
+            cmds.extend(
+                [
+                    f"sleep {per_step_s:.3f}",
+                    f"sendevent {dev} 3 53 {mx}",
+                    f"sendevent {dev} 3 54 {my}",
+                    f"sendevent {dev} 0 0 0",
+                ]
+            )
+        # Release
+        cmds.extend(
+            [
+                f"sendevent {dev} 3 57 -1",
+                f"sendevent {dev} 1 330 0",
+                f"sendevent {dev} 0 0 0",
+            ]
+        )
+        self.shell(" && ".join(cmds), check=True)
+
     def swipe(
         self,
         x1: int,
@@ -148,6 +288,146 @@ class Device:
         x1 = int(w * 0.8)
         x2 = int(w * (0.8 - distance_ratio))
         self.swipe(x1, cy, max(0, x2), cy, duration_ms=duration_ms)
+
+    def swipe_in(
+        self,
+        element_or_bounds,
+        direction: str = "down",
+        *,
+        ratio: float = 0.6,
+        duration_ms: int = 350,
+        margin_ratio: float = 0.15,
+    ) -> None:
+        """Swipe within a specific element / region instead of the full screen.
+
+        `element_or_bounds` can be a `UIElement` or a tuple `(l, t, r, b)`.
+
+        `direction` is the direction the *content* should scroll:
+
+          - "down"  -> reveals items above (finger swipes top -> bottom)
+          - "up"    -> reveals items below (finger swipes bottom -> top)
+          - "right" -> reveals items to the left
+          - "left"  -> reveals items to the right
+
+        `ratio` is the fraction of the available axis the finger travels.
+        `margin_ratio` keeps the swipe away from the edges where Android often
+        eats gestures (back-gesture, status bar, navigation handle).
+        """
+        from .elements import UIElement
+
+        if isinstance(element_or_bounds, UIElement):
+            bounds = element_or_bounds.bounds
+            if bounds is None:
+                raise ValueError("Element has no bounds, cannot swipe inside it")
+        else:
+            bounds = tuple(element_or_bounds)
+
+        l, t, r, b = bounds
+        w, h = r - l, b - t
+        cx, cy = (l + r) // 2, (t + b) // 2
+        mx = int(w * margin_ratio)
+        my = int(h * margin_ratio)
+        dx = int(w * ratio / 2)
+        dy = int(h * ratio / 2)
+
+        direction = direction.lower()
+        if direction == "down":
+            self.swipe(cx, t + my, cx, t + my + dy * 2, duration_ms=duration_ms)
+        elif direction == "up":
+            self.swipe(cx, b - my, cx, b - my - dy * 2, duration_ms=duration_ms)
+        elif direction == "right":
+            self.swipe(l + mx, cy, l + mx + dx * 2, cy, duration_ms=duration_ms)
+        elif direction == "left":
+            self.swipe(r - mx, cy, r - mx - dx * 2, cy, duration_ms=duration_ms)
+        else:
+            raise ValueError(f"Unknown direction: {direction!r}")
+
+    def scroll_to(
+        self,
+        *,
+        max_swipes: int = 25,
+        direction: str = "down",
+        container=None,
+        poll: float = 0.2,
+        duration_ms: int = 350,
+        ratio: float = 0.6,
+        **filters,
+    ):
+        """Swipe inside a scrollable container until an element matching `filters` is visible.
+
+        Returns the matching `UIElement` on success, or None after `max_swipes`.
+
+        - If `container` is None, autodetects the largest visible scrollable
+          view (`class` containing "ScrollView" or "ListView" or
+          "RecyclerView", or `scrollable=true`).
+        - `direction` is the direction *content* should scroll. "auto" tries
+          both: it scrolls down a few times, then up if not found.
+
+        Example:
+            d.scroll_to(text="2004", direction="down")     # year picker
+            d.scroll_to(resource_id="...:id/foo", direction="up", max_swipes=10)
+        """
+        import time
+
+        if "filter" in filters and isinstance(filters["filter"], dict):
+            filters = filters["filter"]
+
+        existing = self.find_element(**filters)
+        if existing is not None:
+            return existing
+
+        # Resolve container
+        if container is None:
+            container = self._auto_scrollable_container()
+        if container is None:
+            # Fall back to a full-screen swipe ratio
+            w, h = self.screen_size()
+            bounds = (0, int(h * 0.15), w, int(h * 0.85))
+        else:
+            bounds = container.bounds
+            if bounds is None:
+                w, h = self.screen_size()
+                bounds = (0, int(h * 0.15), w, int(h * 0.85))
+
+        directions = (
+            [direction] if direction != "auto" else ["down", "up"]
+        )
+
+        for dir_ in directions:
+            for _ in range(max_swipes):
+                self.swipe_in(
+                    bounds, direction=dir_, ratio=ratio, duration_ms=duration_ms
+                )
+                time.sleep(poll)
+                el = self.find_element(**filters)
+                if el is not None:
+                    return el
+
+        return None
+
+    def _auto_scrollable_container(self):
+        """Pick the largest visible scrollable view on screen."""
+        candidates = self.find_elements(scrollable=True)
+        if not candidates:
+            # Heuristic: look for common scrollable widget classes
+            for cls in (
+                "androidx.recyclerview.widget.RecyclerView",
+                "android.widget.ListView",
+                "android.widget.ScrollView",
+                "androidx.viewpager.widget.ViewPager",
+            ):
+                candidates.extend(self.find_elements(class_name=cls))
+        best = None
+        best_area = -1
+        for el in candidates:
+            b = el.bounds
+            if not b:
+                continue
+            area = (b[2] - b[0]) * (b[3] - b[1])
+            if area > best_area:
+                best_area = area
+                best = el
+        return best
 
     # ------------------------------------------------------------------
     # Keyboard / text
@@ -411,16 +691,65 @@ class Device:
         return self.runner.uninstall(package, keep_data=keep_data)
 
     def start_app(self, package: str, *, activity: str | None = None) -> None:
-        """Launch an app by package (optionally specifying activity)."""
+        """Launch an app by package (optionally specifying activity).
+
+        Prefers `cmd package resolve-activity` + `am start -n PKG/ACT`, which
+        is the modern, reliable way. Falls back to `monkey` if the launcher
+        activity can't be resolved.
+        """
+        if not activity:
+            activity = self.resolve_launcher_activity(package)
         if activity:
+            component = activity if "/" in activity else f"{package}/{activity}"
             self.shell(
-                f"am start -n {shlex.quote(package + '/' + activity)}", check=True
-            )
-        else:
-            self.shell(
-                "monkey -p " + shlex.quote(package) + " -c android.intent.category.LAUNCHER 1",
+                "am start -W "
+                "-a android.intent.action.MAIN "
+                "-c android.intent.category.LAUNCHER "
+                f"-n {shlex.quote(component)}",
                 check=True,
             )
+            return
+        # Fallback: monkey. We don't check= here because monkey often returns
+        # weird exit codes even on success.
+        self.shell(
+            "monkey -p " + shlex.quote(package) + " -c android.intent.category.LAUNCHER 1",
+            timeout=30,
+        )
+
+    def resolve_launcher_activity(self, package: str) -> str | None:
+        """Return 'package/Activity' for the LAUNCHER activity, or None.
+
+        Works on Android 7+ via `cmd package`. Falls back to parsing
+        `dumpsys package` for older devices.
+        """
+        # Modern path
+        out = self.shell(
+            "cmd package resolve-activity --brief "
+            "-c android.intent.category.LAUNCHER " + shlex.quote(package)
+        ).stdout
+        for line in out.splitlines():
+            line = line.strip()
+            if "/" in line and " " not in line:
+                return line
+        # Older fallback: dumpsys package
+        out = self.shell(
+            "dumpsys package " + shlex.quote(package)
+        ).stdout
+        match = re.search(
+            r"([A-Za-z][\w.]*\." + re.escape(package.split(".")[-1])
+            + r"|" + re.escape(package) + r")/([A-Za-z0-9_.$]+)",
+            out,
+        )
+        if match:
+            # Try a more specific search first
+            pass
+        match = re.search(
+            re.escape(package) + r"/([A-Za-z0-9_.$]+)",
+            out,
+        )
+        if match:
+            return f"{package}/{match.group(1)}"
+        return None
 
     def stop_app(self, package: str) -> None:
         self.shell(f"am force-stop {shlex.quote(package)}", check=True)

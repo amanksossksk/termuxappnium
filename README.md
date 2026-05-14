@@ -180,6 +180,191 @@ print(d.run("input tap 500 500"))       # same return value (stdout)
 
 Both also tolerate the `adb shell` prefix being present or absent.
 
+## Recording user interactions
+
+Open a target app and stream every tap, swipe, hardware key, and typed-text
+change to stdout (and optionally a `.jsonl` file):
+
+```
+python -m android_controller.record mark.via.gp
+python -m android_controller.record mark.via.gp -o via.jsonl
+```
+
+Sample output:
+
+```
+# Launching mark.via.gp ...
+# Screen: 1080x2400
+# Touch calibration: {'/dev/input/event2': (1080, 2400)}
+# Recording... (Ctrl+C to stop)
+[19:12:03.412] TAP   [540, 1820]  id=mark.via.gp:id/url_bar  text=''
+[19:12:05.103] TEXT  text='example.com'  id=mark.via.gp:id/url_bar
+[19:12:06.812] KEY   ENTER
+[19:12:09.991] SWIPE [540, 2100] -> [540, 600] (310ms)
+```
+
+How it works:
+
+* `getevent -lt` is streamed over your shell (ADB or root) and parsed in real
+  time → produces `TAP` / `SWIPE` / hardware-`KEY` events.
+* After every tap we run `uiautomator dump` and look up the deepest element
+  whose bounds contain the tap point → fills in `resource_id` / `text` /
+  `content-desc`.
+* For typed text we poll the UI hierarchy and diff `EditText.text` values
+  per `resource-id`, so the *resulting* text is logged regardless of which
+  IME or autocomplete the user used.
+* Everything is filtered by the foreground package, so unrelated taps in the
+  status bar / launcher / keyboard are ignored.
+
+Programmatic API:
+
+```python
+from android_controller import Device, Recorder
+
+d = Device.from_config("config.json")
+Recorder(d, target_package="mark.via.gp", output="via.jsonl").run()
+```
+
+CLI options: `--no-launch`, `--no-filter`, `--poll-text-ms`, `--one-to-one`,
+`--config`.
+
+## Scrolling inside a specific view
+
+Full-screen `scroll_down()` / `scroll_up()` swipes from screen-wide
+coordinates, which can miss scrollable regions inside dialogs (e.g. the
+date-picker year list). Use these instead when the target lives inside a
+container:
+
+```python
+# Swipe inside a specific element/region.
+# `direction` is the direction *content* should scroll:
+#   "down"  -> reveals items above (finger swipes top->bottom)
+#   "up"    -> reveals items below (finger swipes bottom->top)
+d.swipe_in(year_list, direction="down")           # year_list is a UIElement
+d.swipe_in((100, 500, 1000, 1500), direction="up")  # raw (l,t,r,b)
+year_list.swipe(direction="down")                  # convenience on UIElement
+```
+
+`d.scroll_to(...)` ties it all together: it autodetects the scrollable
+container on screen (the largest `scrollable=true` / `ScrollView` /
+`ListView` / `RecyclerView`) and keeps swiping until your target element
+appears:
+
+```python
+# Open the year list, scroll to 2004, tap it.
+d.tap_id("android:id/date_picker_header_year")
+d.scroll_to(text="2004", direction="down").tap()
+
+# direction="auto" tries down first, then up.
+d.scroll_to(resource_id="...:id/foo", direction="auto", max_swipes=15)
+
+# Or scroll inside a specific container:
+list_view = d.find_element(class_name="android.widget.ListView")
+list_view.scroll_to(text="2004", direction="down").tap()
+```
+
+`scroll_to` returns the matching `UIElement` on success, or `None` after
+`max_swipes` (default 25).
+
+## Driver-level taps (`real_tap` / `real_swipe`)
+
+Some views — most notoriously the `SelectionTracker` in Android 11+ AOSP
+DocumentsUI — silently ignore events from `input tap` / `input swipe`
+because those go through `InputManager` and lack the multi-touch metadata
+the listener expects. For these views, fall back to `sendevent`-based
+injection:
+
+```python
+d.real_tap(220, 1103)              # raw screen coords
+el.real_tap()                       # convenience on a UIElement
+d.real_swipe(540, 1500, 540, 800)   # interpolated swipe
+```
+
+`real_tap` writes `ABS_MT_TRACKING_ID` + `ABS_MT_POSITION_X/Y` +
+`BTN_TOUCH` + `SYN_REPORT` directly to `/dev/input/event*`, producing
+events indistinguishable from a real finger. The touchscreen device and
+its coordinate range are autodetected via `getevent -lp` on first use
+(then cached).
+
+Requires evdev write access:
+
+- **ADB mode**: usually works out of the box (`shell` is in the `input`
+  group on most devices).
+- **Termux/`su` mode**: works as root.
+
+Use `real_tap` only when needed — it's slightly slower because it spawns
+a multi-command sendevent batch. For normal taps, stick with the cheaper
+`tap()` / `el.tap()`.
+
+## Handling random pop-up screens (ScreenRouter)
+
+App onboarding throws notifications/location/cookies/welcome dialogs at you
+in unpredictable order. `ScreenRouter` lets you declare each case once and
+run a loop that dispatches whichever screen shows up:
+
+```python
+from android_controller import Device, ScreenRouter
+
+d = Device.from_config("config.json")
+d.start_app("mark.via.gp")
+
+router = ScreenRouter(d)
+router.when(text_contains="notifications").tap_label("Skip", "Not now")
+router.when(text_contains="location").tap_label("Don't allow", "Deny")
+router.when(text_contains="cookies").tap_label("Accept all", "Agree")
+router.when(text="Welcome").tap_label("Get started", "Continue")
+router.when(text_contains="update").tap_label("Later", "Not now")
+router.when(text="I agree", clickable=True).tap_match()
+
+# Run until the main screen shows up (or 120s timeout).
+router.run(
+    stop_when={"resource_id": "mark.via.gp:id/url_bar"},
+    timeout=120,
+)
+```
+
+Available rule actions: `.tap_label(*labels)` (taps the first clickable
+text label), `.tap_match()` (taps the matched element itself),
+`.tap_id(resource_id)`, `.tap_desc(*descs)`, `.press_key(key)`, and
+`.do(callable)` for arbitrary logic — the callable receives
+`(device, matched_element)`.
+
+Tips:
+
+- Rules fire in registration order — register the most specific first.
+- Always add `clickable=True` when filtering by button text (Android often
+  duplicates the label in surrounding paragraph TextViews).
+- `stop_when` can be a filter dict (as above) or a callable
+  `(device) -> bool`.
+- `verbose=True` (default) prints which rule matched each iteration.
+
+## Inspecting the current UI
+
+Quick way to dump every `resource-id` / `text` / `class` for the app
+currently on screen — useful when writing automation against an unfamiliar
+app:
+
+```
+python -m android_controller.ids mark.via.gp
+python -m android_controller.ids mark.via.gp --clickable-only
+python -m android_controller.ids mark.via.gp --text
+python -m android_controller.ids mark.via.gp --ids-only        # one id per line
+python -m android_controller.ids mark.via.gp --json            # one JSON obj per element
+python -m android_controller.ids mark.via.gp --watch 0.5       # live-refresh
+python -m android_controller.ids --all                         # ignore package filter
+```
+
+Sample:
+
+```
+RESOURCE_ID                          TEXT          DESC          CLASS                       CLICKABLE  BOUNDS
+--------------------------------------------------------------------------------------------------------------
+mark.via.gp:id/url_bar                                          android.widget.EditText     YES        (24, 144, 1056, 240)
+mark.via.gp:id/btn_back               Back          Go back     android.widget.ImageButton  YES        (0, 144, 144, 240)
+mark.via.gp:id/tab_list               Tabs                      android.widget.ImageButton  YES        (936, 144, 1056, 240)
+...
+```
+
 ## License
 
 MIT (or whatever you prefer — drop a LICENSE file in).

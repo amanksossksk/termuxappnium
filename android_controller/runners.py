@@ -60,6 +60,15 @@ class BaseRunner(ABC):
         """Run a shell command on the device and return the result."""
 
     @abstractmethod
+    def popen_shell(self, cmd: str) -> subprocess.Popen:
+        """Spawn a streaming shell command on the device.
+
+        Returns a `subprocess.Popen` whose stdout yields lines as they arrive.
+        Caller is responsible for `.terminate()` and `.wait()`. Useful for
+        long-running commands like `getevent` or `logcat -v threadtime`.
+        """
+
+    @abstractmethod
     def push(self, local: str, remote: str, *, timeout: Optional[int] = None) -> None:
         """Copy a file from host to device."""
 
@@ -160,6 +169,17 @@ class AdbRunner(BaseRunner):
             raise CommandError(result.cmd, result.returncode, result.stdout, result.stderr)
         return result
 
+    def popen_shell(self, cmd: str) -> subprocess.Popen:
+        cmd = self._strip_adb_shell(cmd)
+        argv = self._adb_argv_prefix + ["shell", cmd]
+        return subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=1,
+            text=True,
+        )
+
     def push(self, local: str, remote: str, *, timeout: Optional[int] = None) -> None:
         if not os.path.exists(local):
             raise FileNotFoundError(local)
@@ -234,6 +254,17 @@ class RootRunner(BaseRunner):
         if check and not result.ok:
             raise CommandError(result.cmd, result.returncode, result.stdout, result.stderr)
         return result
+
+    def popen_shell(self, cmd: str) -> subprocess.Popen:
+        cmd = self._strip_adb_shell(cmd)
+        argv = self._prefix + [cmd]
+        return subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=1,
+            text=True,
+        )
 
     def push(self, local: str, remote: str, *, timeout: Optional[int] = None) -> None:
         # Local-to-device "push" on the device itself is just a copy.
