@@ -90,6 +90,146 @@ class Device:
             check=True,
         )
 
+    # ------------------------------------------------------------------
+    # Low-level touch injection via sendevent (real driver-level touches).
+    #
+    # `input tap` injects MotionEvents through InputManager, which some
+    # views (notably DocumentsUI's SelectionTracker on Android 11+) ignore
+    # because they're missing multi-touch metadata.  `real_tap` writes
+    # ABS_MT_* + BTN_TOUCH events directly to the touchscreen evdev node,
+    # producing events indistinguishable from a real finger touch.
+    # ------------------------------------------------------------------
+
+    # populated lazily on first real_tap/real_swipe call
+    _touchscreen_cache = None
+
+    def _touchscreen_device(self) -> dict:
+        """Return cached dict {'dev': '/dev/input/eventN', 'max_x': N, 'max_y': N}."""
+        if self._touchscreen_cache is not None:
+            return self._touchscreen_cache
+        from .recorder import _parse_touch_calibration
+
+        out = self.shell("getevent -lp", timeout=10).stdout
+        calib = _parse_touch_calibration(out)
+        if not calib:
+            raise CommandError(
+                "getevent -lp",
+                -1,
+                out,
+                "No touchscreen device with BTN_TOUCH + ABS_MT_POSITION_X/Y found. "
+                "real_tap() needs evdev access; on plain ADB this requires "
+                "USB-debugging permissions to /dev/input/*, on Termux it requires root.",
+            )
+        dev, (max_x, max_y) = next(iter(calib.items()))
+        self._touchscreen_cache = {"dev": dev, "max_x": max_x, "max_y": max_y}
+        return self._touchscreen_cache
+
+    def real_tap(self, x: int, y: int, *, duration_ms: int = 80) -> None:
+        """Inject a real driver-level tap via `sendevent` on the touchscreen evdev.
+
+        Use this for views that ignore `input tap` (e.g. RecyclerView
+        SelectionTracker on Android 11 DocumentsUI). Requires evdev access
+        — root if you're in Termux/`su` mode; on ADB it works if the
+        device's input nodes are readable by `shell` (most are).
+        """
+        ts = self._touchscreen_device()
+        dev = ts["dev"]
+        max_x, max_y = ts["max_x"], ts["max_y"]
+        w, h = self.screen_size()
+
+        # Rescale screen coords -> input device coords (often identical, but
+        # older devices use distinct ranges).
+        ix = int(round(x * max_x / w)) if max_x else int(x)
+        iy = int(round(y * max_y / h)) if max_y else int(y)
+
+        # evdev codes (Linux input.h):
+        # EV_SYN=0, SYN_REPORT=0
+        # EV_KEY=1, BTN_TOUCH=330 (0x14A)
+        # EV_ABS=3, ABS_MT_TRACKING_ID=57, ABS_MT_POSITION_X=53,
+        #          ABS_MT_POSITION_Y=54, ABS_MT_TOUCH_MAJOR=48,
+        #          ABS_MT_PRESSURE=58
+        # Use Protocol B (in-kernel multi-touch slot tracking).
+        sleep_s = max(0.0, duration_ms / 1000.0)
+        seq = [
+            # Begin a new touch contact
+            f"sendevent {dev} 3 57 100",          # ABS_MT_TRACKING_ID = 100
+            f"sendevent {dev} 3 53 {ix}",         # ABS_MT_POSITION_X
+            f"sendevent {dev} 3 54 {iy}",         # ABS_MT_POSITION_Y
+            f"sendevent {dev} 3 48 5",            # ABS_MT_TOUCH_MAJOR
+            f"sendevent {dev} 3 58 50",           # ABS_MT_PRESSURE
+            f"sendevent {dev} 1 330 1",           # BTN_TOUCH down
+            f"sendevent {dev} 0 0 0",             # SYN_REPORT
+            f"sleep {sleep_s:.3f}" if sleep_s else "true",
+            # Release the contact (Protocol B)
+            f"sendevent {dev} 3 57 -1",           # ABS_MT_TRACKING_ID = -1
+            f"sendevent {dev} 1 330 0",           # BTN_TOUCH up
+            f"sendevent {dev} 0 0 0",             # SYN_REPORT
+        ]
+        # Run as a single shell so all events are buffered together (atomic
+        # from the framework's perspective and much faster than 10 round trips).
+        self.shell(" && ".join(seq), check=True)
+
+    def real_swipe(
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        *,
+        duration_ms: int = 250,
+        steps: int = 16,
+    ) -> None:
+        """Real driver-level swipe via sendevent (interpolated MOVE events).
+
+        Use when `input swipe` is ignored by a custom touch listener.
+        """
+        ts = self._touchscreen_device()
+        dev = ts["dev"]
+        max_x, max_y = ts["max_x"], ts["max_y"]
+        w, h = self.screen_size()
+
+        def rescale(x: int, y: int) -> tuple[int, int]:
+            ix = int(round(x * max_x / w)) if max_x else int(x)
+            iy = int(round(y * max_y / h)) if max_y else int(y)
+            return ix, iy
+
+        ix1, iy1 = rescale(x1, y1)
+        ix2, iy2 = rescale(x2, y2)
+        per_step_s = (duration_ms / 1000.0) / max(1, steps)
+
+        cmds: list[str] = [
+            # Touch down at start
+            f"sendevent {dev} 3 57 100",
+            f"sendevent {dev} 3 53 {ix1}",
+            f"sendevent {dev} 3 54 {iy1}",
+            f"sendevent {dev} 3 48 5",
+            f"sendevent {dev} 3 58 50",
+            f"sendevent {dev} 1 330 1",
+            f"sendevent {dev} 0 0 0",
+        ]
+        # Interpolated MOVEs
+        for i in range(1, steps + 1):
+            t = i / steps
+            mx = int(round(ix1 + (ix2 - ix1) * t))
+            my = int(round(iy1 + (iy2 - iy1) * t))
+            cmds.extend(
+                [
+                    f"sleep {per_step_s:.3f}",
+                    f"sendevent {dev} 3 53 {mx}",
+                    f"sendevent {dev} 3 54 {my}",
+                    f"sendevent {dev} 0 0 0",
+                ]
+            )
+        # Release
+        cmds.extend(
+            [
+                f"sendevent {dev} 3 57 -1",
+                f"sendevent {dev} 1 330 0",
+                f"sendevent {dev} 0 0 0",
+            ]
+        )
+        self.shell(" && ".join(cmds), check=True)
+
     def swipe(
         self,
         x1: int,

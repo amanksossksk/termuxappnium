@@ -266,6 +266,36 @@ list_view.scroll_to(text="2004", direction="down").tap()
 `scroll_to` returns the matching `UIElement` on success, or `None` after
 `max_swipes` (default 25).
 
+## Driver-level taps (`real_tap` / `real_swipe`)
+
+Some views — most notoriously the `SelectionTracker` in Android 11+ AOSP
+DocumentsUI — silently ignore events from `input tap` / `input swipe`
+because those go through `InputManager` and lack the multi-touch metadata
+the listener expects. For these views, fall back to `sendevent`-based
+injection:
+
+```python
+d.real_tap(220, 1103)              # raw screen coords
+el.real_tap()                       # convenience on a UIElement
+d.real_swipe(540, 1500, 540, 800)   # interpolated swipe
+```
+
+`real_tap` writes `ABS_MT_TRACKING_ID` + `ABS_MT_POSITION_X/Y` +
+`BTN_TOUCH` + `SYN_REPORT` directly to `/dev/input/event*`, producing
+events indistinguishable from a real finger. The touchscreen device and
+its coordinate range are autodetected via `getevent -lp` on first use
+(then cached).
+
+Requires evdev write access:
+
+- **ADB mode**: usually works out of the box (`shell` is in the `input`
+  group on most devices).
+- **Termux/`su` mode**: works as root.
+
+Use `real_tap` only when needed — it's slightly slower because it spawns
+a multi-command sendevent batch. For normal taps, stick with the cheaper
+`tap()` / `el.tap()`.
+
 ## Handling random pop-up screens (ScreenRouter)
 
 App onboarding throws notifications/location/cookies/welcome dialogs at you
